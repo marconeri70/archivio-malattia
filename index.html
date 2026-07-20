@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f766e" />
-  <meta name="description" content="Archivio personale e cifrato dei certificati di malattia." />
+  <meta name="description" content="Archivio personale, locale e cifrato dei certificati di malattia." />
   <title>Archivio Malattia</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon-192.png" />
@@ -20,18 +20,19 @@
       <p id="securitySubtitle">I dati restano cifrati su questo dispositivo.</p>
 
       <form id="setupPinForm" class="hidden">
-        <label for="setupPin">Crea un PIN da 4 a 8 cifre</label>
-        <input id="setupPin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="new-password" required />
+        <label for="setupPin">Crea un PIN da 6 a 10 cifre</label>
+        <input id="setupPin" inputmode="numeric" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autocomplete="new-password" required />
         <label for="setupPinConfirm">Ripeti il PIN</label>
-        <input id="setupPinConfirm" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="new-password" required />
+        <input id="setupPinConfirm" inputmode="numeric" pattern="[0-9]{6,10}" minlength="6" maxlength="10" autocomplete="new-password" required />
         <button class="btn primary" type="submit">Attiva archivio cifrato</button>
-        <p class="warning-text">Conserva il PIN: se viene dimenticato, i documenti non possono essere recuperati.</p>
+        <p class="warning-text">Conserva il PIN: senza di esso i documenti cifrati non possono essere recuperati.</p>
       </form>
 
       <form id="unlockForm" class="hidden">
         <label for="unlockPin">Inserisci il PIN</label>
-        <input id="unlockPin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="current-password" required />
-        <button class="btn primary" type="submit">Sblocca</button>
+        <input id="unlockPin" inputmode="numeric" pattern="[0-9]{4,10}" maxlength="10" autocomplete="current-password" required />
+        <button id="unlockBtn" class="btn primary" type="submit">Sblocca</button>
+        <p id="lockoutCountdown" class="warning-text hidden"></p>
         <button id="resetAppBtn" class="btn danger ghost" type="button">Azzera archivio</button>
       </form>
       <p id="securityMessage" class="form-message" role="status"></p>
@@ -41,174 +42,271 @@
   <div id="appShell" class="app-shell hidden">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Archivio personale</p>
+        <p class="eyebrow">Archivio personale cifrato</p>
         <h1>Certificati di malattia</h1>
       </div>
       <div class="top-actions">
-        <button id="installBtn" class="icon-btn hidden" type="button" title="Installa app">⬇</button>
-        <button id="lockBtn" class="icon-btn" type="button" title="Blocca archivio">🔒</button>
+        <button id="installBtn" class="icon-btn hidden" type="button" title="Installa app" aria-label="Installa app">⬇</button>
+        <button id="lockBtn" class="icon-btn" type="button" title="Blocca archivio" aria-label="Blocca archivio">🔒</button>
       </div>
     </header>
 
+    <nav class="app-nav" aria-label="Sezioni">
+      <button class="nav-btn active" data-panel="archivePanel" type="button">📁 <span>Archivio</span></button>
+      <button class="nav-btn" data-panel="statisticsPanel" type="button">📊 <span>Statistiche</span></button>
+      <button class="nav-btn" data-panel="toolsPanel" type="button">⚙️ <span>Strumenti</span></button>
+    </nav>
+
     <main>
+      <section id="globalBanner" class="alert-card hidden" aria-live="polite"></section>
       <section id="expiryBanner" class="alert-card hidden" aria-live="polite"></section>
 
       <section class="stats-grid" aria-label="Riepilogo">
-        <article class="stat-card">
-          <span>Certificati</span>
-          <strong id="statCertificates">0</strong>
-        </article>
-        <article class="stat-card">
-          <span>Giorni totali</span>
-          <strong id="statDays">0</strong>
-        </article>
-        <article class="stat-card">
-          <span>Anno selezionato</span>
-          <strong id="statYear">Tutti</strong>
-        </article>
+        <article class="stat-card"><span>Certificati</span><strong id="statCertificates">0</strong></article>
+        <article class="stat-card"><span>Episodi</span><strong id="statEpisodes">0</strong></article>
+        <article class="stat-card"><span>Giorni calendario</span><strong id="statDays">0</strong></article>
+        <article class="stat-card"><span>Giorni lavorativi</span><strong id="statWorkDays">0</strong></article>
       </section>
 
-      <section class="toolbar-card">
-        <div class="search-wrap">
-          <label class="sr-only" for="searchInput">Cerca</label>
-          <input id="searchInput" type="search" placeholder="Cerca PUC, medico o data…" />
+      <section id="archivePanel" class="app-panel active-panel">
+        <section class="toolbar-card">
+          <div class="search-wrap">
+            <label class="sr-only" for="searchInput">Cerca</label>
+            <input id="searchInput" type="search" placeholder="Cerca PUC, medico, categoria o data…" />
+          </div>
+          <select id="yearFilter" aria-label="Filtra per anno"><option value="all">Tutti gli anni</option></select>
+          <select id="statusFilter" aria-label="Filtra per stato">
+            <option value="all">Tutti gli stati</option>
+            <option value="in-corso">In corso</option>
+            <option value="terminato">Terminati</option>
+            <option value="futuro">Futuri</option>
+          </select>
+          <button id="addCertificateBtn" class="btn primary" type="button">＋ Nuovo certificato</button>
+        </section>
+
+        <section id="emptyState" class="empty-state">
+          <div class="empty-icon">📄</div>
+          <h2>Nessun certificato archiviato</h2>
+          <p>Scatta una foto, importa uno o più documenti oppure inserisci i dati manualmente.</p>
+          <button id="emptyAddBtn" class="btn primary" type="button">Aggiungi il primo certificato</button>
+        </section>
+
+        <section id="certificateList" class="episode-list" aria-live="polite"></section>
+      </section>
+
+      <section id="statisticsPanel" class="app-panel hidden">
+        <div class="section-heading">
+          <div><p class="eyebrow">Analisi personale</p><h2>Statistiche</h2></div>
+          <select id="statsYearFilter" aria-label="Anno statistiche"><option value="all">Tutti gli anni</option></select>
         </div>
-        <select id="yearFilter" aria-label="Filtra per anno">
-          <option value="all">Tutti gli anni</option>
-        </select>
-        <button id="addCertificateBtn" class="btn primary" type="button">＋ Nuovo certificato</button>
+        <section class="analytics-grid">
+          <article class="analytics-card span-2-card">
+            <h3>Giorni per mese</h3>
+            <p class="muted">Le barre mostrano i giorni di calendario coperti, senza contare due volte le sovrapposizioni.</p>
+            <div id="monthlyChart" class="bar-chart" aria-label="Grafico mensile"></div>
+          </article>
+          <article class="analytics-card">
+            <h3>Confronto annuale</h3>
+            <div id="yearlyChart" class="mini-bars"></div>
+          </article>
+          <article class="analytics-card">
+            <h3>Categorie</h3>
+            <div id="categoryStats" class="category-list"></div>
+          </article>
+          <article class="analytics-card span-2-card">
+            <h3>Calendario dei periodi</h3>
+            <div class="legend"><span><i class="day-mark calendar"></i> Giorno di calendario</span><span><i class="day-mark work"></i> Giorno lavorativo</span></div>
+            <div id="yearCalendar" class="year-calendar"></div>
+          </article>
+        </section>
       </section>
 
-      <section id="emptyState" class="empty-state">
-        <div class="empty-icon">📄</div>
-        <h2>Nessun certificato archiviato</h2>
-        <p>Scatta una foto, importa un PDF oppure inserisci i dati manualmente.</p>
-        <button id="emptyAddBtn" class="btn primary" type="button">Aggiungi il primo certificato</button>
-      </section>
+      <section id="toolsPanel" class="app-panel hidden">
+        <div class="section-heading"><div><p class="eyebrow">Protezione e trasferimento</p><h2>Strumenti e impostazioni</h2></div></div>
+        <section class="tools-grid">
+          <article class="utility-card">
+            <h3>Backup ed esportazione</h3>
+            <div class="utility-grid">
+              <button id="exportJsonBtn" class="btn secondary" type="button">Backup cifrato</button>
+              <button id="importJsonBtn" class="btn secondary" type="button">Ripristina backup</button>
+              <button id="exportCsvBtn" class="btn secondary" type="button">Esporta CSV</button>
+              <button id="exportPdfBtn" class="btn secondary" type="button">Crea riepilogo PDF</button>
+              <button id="openInpsGuideBtn" class="btn secondary" type="button">Importa da INPS</button>
+            </div>
+            <input id="importBackupInput" type="file" accept="application/json" hidden />
+          </article>
 
-      <section id="certificateList" class="certificate-list" aria-live="polite"></section>
+          <article class="utility-card">
+            <h3>Sicurezza</h3>
+            <form id="settingsForm" class="settings-form">
+              <label>Blocco automatico
+                <select id="autoLockMinutes">
+                  <option value="1">Dopo 1 minuto</option><option value="3">Dopo 3 minuti</option><option value="5">Dopo 5 minuti</option><option value="10">Dopo 10 minuti</option><option value="30">Dopo 30 minuti</option><option value="0">Mai</option>
+                </select>
+              </label>
+              <label class="switch-row"><input id="lockOnHidden" type="checkbox" /> <span>Blocca quando l’app passa in secondo piano</span></label>
+              <label>Promemoria backup
+                <select id="backupReminderDays"><option value="7">Ogni 7 giorni</option><option value="15">Ogni 15 giorni</option><option value="30">Ogni 30 giorni</option><option value="60">Ogni 60 giorni</option><option value="0">Disattivato</option></select>
+              </label>
+              <button class="btn primary" type="submit">Salva impostazioni</button>
+            </form>
+            <button id="openChangePinBtn" class="btn secondary full-width" type="button">Cambia PIN e ricifra l’archivio</button>
+          </article>
 
-      <section class="utility-card">
-        <h2>Strumenti</h2>
-        <div class="utility-grid">
-          <button id="exportJsonBtn" class="btn secondary" type="button">Backup cifrato</button>
-          <button id="importJsonBtn" class="btn secondary" type="button">Ripristina backup</button>
-          <button id="exportCsvBtn" class="btn secondary" type="button">Esporta riepilogo CSV</button>
-          <button id="openInpsBtn" class="btn secondary" type="button">Apri portale INPS</button>
-        </div>
-        <input id="importBackupInput" type="file" accept="application/json" hidden />
+          <article class="utility-card">
+            <h3>Spazio sul dispositivo</h3>
+            <p id="storageText" class="muted">Calcolo in corso…</p>
+            <div class="storage-bar"><span id="storageBar"></span></div>
+            <button id="persistStorageBtn" class="btn secondary" type="button">Proteggi i dati dalla pulizia automatica</button>
+            <p class="small-note">La disponibilità dipende dal browser. Mantieni sempre un backup recente.</p>
+          </article>
+
+          <article class="utility-card">
+            <h3>Moduli locali</h3>
+            <ul class="status-list">
+              <li><span>OCR italiano</span><strong id="ocrModuleStatus">Locale</strong></li>
+              <li><span>Lettura PDF</span><strong>Locale</strong></li>
+              <li><span>Correzione scansione</span><strong id="cvModuleStatus">Pronta al primo uso</strong></li>
+              <li><span>Generazione PDF</span><strong>Locale</strong></li>
+            </ul>
+          </article>
+        </section>
       </section>
     </main>
   </div>
 
-  <dialog id="certificateDialog" class="dialog">
+  <dialog id="certificateDialog" class="dialog wide-dialog">
     <form id="certificateForm" method="dialog" novalidate>
       <div class="dialog-header">
-        <div>
-          <p class="eyebrow">Nuovo archivio</p>
-          <h2 id="dialogTitle">Aggiungi certificato</h2>
-        </div>
+        <div><p class="eyebrow">Archivio</p><h2 id="dialogTitle">Aggiungi certificato</h2></div>
         <button id="closeDialogBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button>
       </div>
-
       <input id="recordId" type="hidden" />
 
       <section class="import-box">
         <label class="file-drop" for="documentInput">
           <span class="file-drop-icon">📷</span>
-          <strong>Scatta una foto o importa un documento</strong>
-          <small>Immagine o PDF. Il file resta sul dispositivo.</small>
-          <input id="documentInput" type="file" accept="image/*,application/pdf" capture="environment" />
+          <strong>Scatta foto o importa documenti</strong>
+          <small>Puoi selezionare più immagini e PDF. Le foto vengono compresse sul dispositivo.</small>
+          <input id="documentInput" type="file" accept="image/*,application/pdf" capture="environment" multiple />
         </label>
-        <div id="fileInfo" class="file-info hidden"></div>
+        <div id="attachmentsList" class="attachments-list"></div>
         <div class="button-row">
-          <button id="analyzeBtn" class="btn secondary" type="button" disabled>Leggi dati automaticamente</button>
-          <button id="removeFileBtn" class="btn danger ghost hidden" type="button">Rimuovi allegato</button>
+          <button id="analyzeBtn" class="btn secondary" type="button" disabled>Leggi il documento principale</button>
+          <button id="editImageBtn" class="btn secondary hidden" type="button">Ritaglia e migliora foto</button>
         </div>
-        <div id="ocrProgress" class="progress-wrap hidden">
-          <progress id="ocrProgressBar" max="100" value="0"></progress>
-          <span id="ocrProgressText">Analisi in corso…</span>
-        </div>
-        <p class="privacy-note">La lettura automatica avviene nel browser. Controlla sempre i dati prima di salvare.</p>
+        <div id="ocrProgress" class="progress-wrap hidden"><progress id="ocrProgressBar" max="100" value="0"></progress><span id="ocrProgressText">Analisi in corso…</span></div>
+        <div id="ocrReview" class="ocr-review hidden"></div>
+        <p class="privacy-note">OCR, PDF, scansione e cifratura avvengono nel browser. Controlla sempre i dati prima di salvare.</p>
       </section>
 
       <div class="form-grid">
-        <label>
-          Numero PUC
-          <input id="puc" name="puc" inputmode="numeric" maxlength="30" placeholder="Es. 451368375" />
+        <label>Numero PUC<input id="puc" inputmode="numeric" maxlength="30" placeholder="Es. 451368375" /></label>
+        <label>Data visita<input id="visitDate" type="date" /></label>
+        <label>Malattia dal<input id="startDate" type="date" required /></label>
+        <label>Prognosi fino al<input id="endDate" type="date" required /></label>
+        <label>Tipo certificato
+          <select id="certificateType"><option value="inizio">Inizio</option><option value="continuazione">Continuazione</option><option value="ricaduta">Ricaduta</option></select>
         </label>
-        <label>
-          Data visita
-          <input id="visitDate" name="visitDate" type="date" />
+        <label>Collega all’episodio
+          <select id="episodeSelect"><option value="new">Nuovo episodio</option></select>
         </label>
-        <label>
-          Malattia dal
-          <input id="startDate" name="startDate" type="date" required />
+        <label>Tipo visita
+          <select id="visitType"><option value="ambulatoriale">Ambulatoriale</option><option value="domiciliare">Domiciliare</option><option value="pronto-soccorso">Pronto soccorso</option><option value="non-indicato">Non indicato</option></select>
         </label>
-        <label>
-          Prognosi fino al
-          <input id="endDate" name="endDate" type="date" required />
+        <label>Categoria personale
+          <input id="category" list="categorySuggestions" placeholder="Es. Schiena, cefalea, influenza" />
+          <datalist id="categorySuggestions"><option value="Schiena"></option><option value="Cefalea"></option><option value="Influenza"></option><option value="Infortunio"></option><option value="Altro"></option></datalist>
         </label>
-        <label>
-          Tipo certificato
-          <select id="certificateType" name="certificateType">
-            <option value="inizio">Inizio</option>
-            <option value="continuazione">Continuazione</option>
-            <option value="ricaduta">Ricaduta</option>
-          </select>
+        <label class="span-2">Medico<input id="doctor" autocomplete="off" placeholder="Cognome e nome" /></label>
+        <label>Giornate lavorative interessate<input id="manualWorkDays" type="number" min="0" max="366" placeholder="Lascia vuoto per calcolo lun–ven" /></label>
+        <label>Stato visita fiscale
+          <select id="fiscalVisitStatus"><option value="nessuna">Nessuna</option><option value="attesa">Attesa</option><option value="ricevuta">Ricevuta</option></select>
         </label>
-        <label>
-          Tipo visita
-          <select id="visitType" name="visitType">
-            <option value="ambulatoriale">Ambulatoriale</option>
-            <option value="domiciliare">Domiciliare</option>
-            <option value="pronto-soccorso">Pronto soccorso</option>
-            <option value="non-indicato">Non indicato</option>
-          </select>
+        <label>Data visita fiscale<input id="fiscalVisitDate" type="datetime-local" /></label>
+        <label>Comunicazione all’azienda<input id="companyNotifiedAt" type="datetime-local" /></label>
+        <label>Modalità comunicazione
+          <select id="companyMethod"><option value="">Non indicata</option><option value="telefono">Telefono</option><option value="email">E-mail</option><option value="whatsapp">WhatsApp</option><option value="portale">Portale aziendale</option><option value="altro">Altro</option></select>
         </label>
-        <label class="span-2">
-          Medico
-          <input id="doctor" name="doctor" autocomplete="off" placeholder="Cognome e nome" />
-        </label>
-        <label class="span-2">
-          Diagnosi / note cliniche
-          <textarea id="diagnosis" name="diagnosis" rows="3" placeholder="Campo facoltativo e nascosto nelle schede"></textarea>
-        </label>
-        <label class="span-2">
-          Note personali
-          <textarea id="notes" name="notes" rows="3" placeholder="Es. comunicato all'azienda, controllo previsto…"></textarea>
-        </label>
+        <label>Persona/reparto avvisato<input id="companyContact" placeholder="Es. Responsabile turno" /></label>
+        <label class="span-2">Diagnosi / note cliniche<textarea id="diagnosis" rows="3" placeholder="Campo facoltativo, cifrato e nascosto nelle schede"></textarea></label>
+        <label class="span-2">Note personali<textarea id="notes" rows="3" placeholder="Es. comunicazioni, controlli, informazioni utili…"></textarea></label>
       </div>
 
+      <div id="validationWarnings" class="validation-warnings hidden"></div>
       <p id="formMessage" class="form-message" role="alert"></p>
-
-      <div class="dialog-actions">
-        <button id="cancelBtn" class="btn secondary" type="button">Annulla</button>
-        <button class="btn primary" type="submit">Salva certificato</button>
-      </div>
+      <div class="dialog-actions"><button id="cancelBtn" class="btn secondary" type="button">Annulla</button><button class="btn primary" type="submit">Salva certificato</button></div>
     </form>
   </dialog>
 
   <dialog id="detailsDialog" class="dialog details-dialog">
-    <div class="dialog-header">
-      <div>
-        <p class="eyebrow">Dettaglio</p>
-        <h2 id="detailsTitle">Certificato</h2>
-      </div>
-      <button id="closeDetailsBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button>
-    </div>
+    <div class="dialog-header"><div><p class="eyebrow">Dettaglio</p><h2 id="detailsTitle">Certificato</h2></div><button id="closeDetailsBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button></div>
     <div id="detailsContent"></div>
+    <div id="detailAttachments" class="detail-attachments"></div>
     <div class="dialog-actions">
-      <button id="viewAttachmentBtn" class="btn secondary hidden" type="button">Apri allegato</button>
+      <button id="exportRecordPdfBtn" class="btn secondary" type="button">PDF</button>
+      <button id="printRecordBtn" class="btn secondary" type="button">Stampa</button>
+      <button id="shareRecordBtn" class="btn secondary" type="button">Condividi</button>
+      <button id="calendarRecordBtn" class="btn secondary" type="button">Promemoria calendario</button>
       <button id="editRecordBtn" class="btn secondary" type="button">Modifica</button>
       <button id="deleteRecordBtn" class="btn danger" type="button">Elimina</button>
     </div>
   </dialog>
 
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
+  <dialog id="imageEditorDialog" class="dialog image-dialog">
+    <div class="dialog-header"><div><p class="eyebrow">Scansione</p><h2>Ritaglia e migliora</h2></div><button id="closeImageEditorBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button></div>
+    <div class="canvas-wrap"><canvas id="imageEditorCanvas"></canvas><div id="cropOverlay" class="crop-overlay"></div></div>
+    <div class="editor-controls">
+      <div class="button-row"><button id="rotateLeftBtn" class="btn secondary" type="button">↶ Ruota</button><button id="rotateRightBtn" class="btn secondary" type="button">↷ Ruota</button><button id="autoPerspectiveBtn" class="btn secondary" type="button">▱ Correggi prospettiva</button></div>
+      <label class="switch-row"><input id="contrastToggle" type="checkbox" /> <span>Aumenta contrasto</span></label>
+      <label class="switch-row"><input id="grayscaleToggle" type="checkbox" /> <span>Bianco e nero</span></label>
+      <div class="crop-sliders">
+        <label>Taglio alto <input id="cropTop" type="range" min="0" max="35" value="3" /></label>
+        <label>Taglio basso <input id="cropBottom" type="range" min="0" max="35" value="3" /></label>
+        <label>Taglio sinistra <input id="cropLeft" type="range" min="0" max="35" value="3" /></label>
+        <label>Taglio destra <input id="cropRight" type="range" min="0" max="35" value="3" /></label>
+      </div>
+    </div>
+    <p id="imageEditorMessage" class="form-message"></p>
+    <div class="dialog-actions"><button id="cancelImageEditBtn" class="btn secondary" type="button">Annulla</button><button id="applyImageEditBtn" class="btn primary" type="button">Applica alla foto</button></div>
+  </dialog>
+
+  <dialog id="changePinDialog" class="dialog compact-dialog">
+    <form id="changePinForm" method="dialog">
+      <div class="dialog-header"><div><p class="eyebrow">Sicurezza</p><h2>Cambia PIN</h2></div><button id="closeChangePinBtn" class="icon-btn" type="button">✕</button></div>
+      <p class="muted">Tutti i certificati e gli allegati verranno ricifrati. Non chiudere l’app durante l’operazione.</p>
+      <label>PIN attuale<input id="currentPin" inputmode="numeric" maxlength="10" required /></label>
+      <label>Nuovo PIN da 6 a 10 cifre<input id="newPin" inputmode="numeric" minlength="6" maxlength="10" required /></label>
+      <label>Ripeti nuovo PIN<input id="newPinConfirm" inputmode="numeric" minlength="6" maxlength="10" required /></label>
+      <div id="changePinProgress" class="progress-wrap hidden"><progress max="100" value="0"></progress><span>Ricifratura in corso…</span></div>
+      <p id="changePinMessage" class="form-message"></p>
+      <div class="dialog-actions"><button class="btn primary" type="submit">Cambia PIN</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="exportPdfDialog" class="dialog compact-dialog">
+    <form id="exportPdfForm" method="dialog">
+      <div class="dialog-header"><div><p class="eyebrow">Esportazione</p><h2>Riepilogo PDF</h2></div><button id="closeExportPdfBtn" class="icon-btn" type="button">✕</button></div>
+      <label>Periodo<select id="pdfScope"><option value="filtered">Anno/filtro selezionato</option><option value="all">Tutto l’archivio</option></select></label>
+      <label class="switch-row"><input id="pdfIncludeDiagnosis" type="checkbox" /> <span>Includi diagnosi e note cliniche</span></label>
+      <label class="switch-row"><input id="pdfIncludePersonalNotes" type="checkbox" checked /> <span>Includi note personali</span></label>
+      <p class="warning-text">Il PDF esportato non è cifrato: conservalo in un luogo sicuro.</p>
+      <div class="dialog-actions"><button class="btn primary" type="submit">Genera PDF</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="inpsDialog" class="dialog compact-dialog">
+    <div class="dialog-header"><div><p class="eyebrow">Procedura assistita</p><h2>Importa da INPS</h2></div><button id="closeInpsBtn" class="icon-btn" type="button">✕</button></div>
+    <ol class="steps-list"><li>Apri il portale ufficiale INPS.</li><li>Accedi con SPID o CIE e scarica il PDF del certificato.</li><li>Torna qui e importa il PDF. L’app non salva credenziali.</li></ol>
+    <div class="dialog-actions"><button id="openInpsBtn" class="btn secondary" type="button">Apri INPS</button><button id="inpsImportBtn" class="btn primary" type="button">Importa PDF scaricato</button></div>
+  </dialog>
+
+  <script src="vendor/tesseract/tesseract.min.js"></script>
+  <script src="vendor/pdfjs/pdf.min.js"></script>
+  <script src="vendor/jspdf/jspdf.umd.min.js"></script>
   <script src="crypto.js"></script>
   <script src="db.js"></script>
+  <script src="scanner.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

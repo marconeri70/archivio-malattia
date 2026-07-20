@@ -2,8 +2,9 @@
 
 const SecureDB = (() => {
   const DB_NAME = 'archivio-malattia-db';
-  const DB_VERSION = 1;
-  const STORE = 'records';
+  const DB_VERSION = 2;
+  const RECORDS = 'records';
+  const SHARED = 'sharedFiles';
   let dbPromise;
 
   function open() {
@@ -12,9 +13,8 @@ const SecureDB = (() => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         const db = request.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          db.createObjectStore(STORE, { keyPath: 'id' });
-        }
+        if (!db.objectStoreNames.contains(RECORDS)) db.createObjectStore(RECORDS, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(SHARED)) db.createObjectStore(SHARED, { keyPath: 'id' });
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -22,40 +22,57 @@ const SecureDB = (() => {
     return dbPromise;
   }
 
-  async function transact(mode, callback) {
+  async function transact(storeName, mode, callback) {
     const db = await open();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, mode);
-      const store = tx.objectStore(STORE);
+      const tx = db.transaction(storeName, mode);
+      const store = tx.objectStore(storeName);
       let result;
-      try { result = callback(store); } catch (error) { reject(error); return; }
+      try { result = callback(store, tx); } catch (error) { reject(error); return; }
       tx.oncomplete = () => resolve(result);
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error('Operazione annullata'));
     });
   }
 
-  async function put(record) {
-    return transact('readwrite', store => store.put(record));
-  }
-
-  async function remove(id) {
-    return transact('readwrite', store => store.delete(id));
-  }
-
-  async function clear() {
-    return transact('readwrite', store => store.clear());
-  }
+  async function put(record) { return transact(RECORDS, 'readwrite', store => store.put(record)); }
+  async function remove(id) { return transact(RECORDS, 'readwrite', store => store.delete(id)); }
+  async function clear() { return transact(RECORDS, 'readwrite', store => store.clear()); }
 
   async function getAll() {
     const db = await open();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const req = tx.objectStore(STORE).getAll();
+      const tx = db.transaction(RECORDS, 'readonly');
+      const req = tx.objectStore(RECORDS).getAll();
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => reject(req.error);
     });
   }
+
+  async function replaceAll(records) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(RECORDS, 'readwrite');
+      const store = tx.objectStore(RECORDS);
+      store.clear();
+      for (const item of records) store.put(item);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('Sostituzione annullata'));
+    });
+  }
+
+  async function getSharedFiles() {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(SHARED, 'readonly');
+      const req = tx.objectStore(SHARED).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function clearSharedFiles() { return transact(SHARED, 'readwrite', store => store.clear()); }
 
   async function destroy() {
     if (dbPromise) {
@@ -71,5 +88,5 @@ const SecureDB = (() => {
     });
   }
 
-  return { put, remove, clear, getAll, destroy };
+  return { put, remove, clear, getAll, replaceAll, getSharedFiles, clearSharedFiles, destroy };
 })();
