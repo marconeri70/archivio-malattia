@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="description" content="Archivio personale e cifrato dei certificati di malattia." />
+  <title>Archivio Malattia</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <noscript>Questa applicazione richiede JavaScript.</noscript>
+
+  <div id="securityScreen" class="security-screen">
+    <section class="security-card" aria-labelledby="securityTitle">
+      <div class="app-logo" aria-hidden="true">AM</div>
+      <h1 id="securityTitle">Archivio Malattia</h1>
+      <p id="securitySubtitle">I dati restano cifrati su questo dispositivo.</p>
+
+      <form id="setupPinForm" class="hidden">
+        <label for="setupPin">Crea un PIN da 4 a 8 cifre</label>
+        <input id="setupPin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="new-password" required />
+        <label for="setupPinConfirm">Ripeti il PIN</label>
+        <input id="setupPinConfirm" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="new-password" required />
+        <button class="btn primary" type="submit">Attiva archivio cifrato</button>
+        <p class="warning-text">Conserva il PIN: se viene dimenticato, i documenti non possono essere recuperati.</p>
+      </form>
+
+      <form id="unlockForm" class="hidden">
+        <label for="unlockPin">Inserisci il PIN</label>
+        <input id="unlockPin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="current-password" required />
+        <button class="btn primary" type="submit">Sblocca</button>
+        <button id="resetAppBtn" class="btn danger ghost" type="button">Azzera archivio</button>
+      </form>
+      <p id="securityMessage" class="form-message" role="status"></p>
+    </section>
+  </div>
+
+  <div id="appShell" class="app-shell hidden">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Archivio personale</p>
+        <h1>Certificati di malattia</h1>
+      </div>
+      <div class="top-actions">
+        <button id="installBtn" class="icon-btn hidden" type="button" title="Installa app">⬇</button>
+        <button id="lockBtn" class="icon-btn" type="button" title="Blocca archivio">🔒</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="expiryBanner" class="alert-card hidden" aria-live="polite"></section>
+
+      <section class="stats-grid" aria-label="Riepilogo">
+        <article class="stat-card">
+          <span>Certificati</span>
+          <strong id="statCertificates">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>Giorni totali</span>
+          <strong id="statDays">0</strong>
+        </article>
+        <article class="stat-card">
+          <span>Anno selezionato</span>
+          <strong id="statYear">Tutti</strong>
+        </article>
+      </section>
+
+      <section class="toolbar-card">
+        <div class="search-wrap">
+          <label class="sr-only" for="searchInput">Cerca</label>
+          <input id="searchInput" type="search" placeholder="Cerca PUC, medico o data…" />
+        </div>
+        <select id="yearFilter" aria-label="Filtra per anno">
+          <option value="all">Tutti gli anni</option>
+        </select>
+        <button id="addCertificateBtn" class="btn primary" type="button">＋ Nuovo certificato</button>
+      </section>
+
+      <section id="emptyState" class="empty-state">
+        <div class="empty-icon">📄</div>
+        <h2>Nessun certificato archiviato</h2>
+        <p>Scatta una foto, importa un PDF oppure inserisci i dati manualmente.</p>
+        <button id="emptyAddBtn" class="btn primary" type="button">Aggiungi il primo certificato</button>
+      </section>
+
+      <section id="certificateList" class="certificate-list" aria-live="polite"></section>
+
+      <section class="utility-card">
+        <h2>Strumenti</h2>
+        <div class="utility-grid">
+          <button id="exportJsonBtn" class="btn secondary" type="button">Backup cifrato</button>
+          <button id="importJsonBtn" class="btn secondary" type="button">Ripristina backup</button>
+          <button id="exportCsvBtn" class="btn secondary" type="button">Esporta riepilogo CSV</button>
+          <button id="openInpsBtn" class="btn secondary" type="button">Apri portale INPS</button>
+        </div>
+        <input id="importBackupInput" type="file" accept="application/json" hidden />
+      </section>
+    </main>
+  </div>
+
+  <dialog id="certificateDialog" class="dialog">
+    <form id="certificateForm" method="dialog" novalidate>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Nuovo archivio</p>
+          <h2 id="dialogTitle">Aggiungi certificato</h2>
+        </div>
+        <button id="closeDialogBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button>
+      </div>
+
+      <input id="recordId" type="hidden" />
+
+      <section class="import-box">
+        <label class="file-drop" for="documentInput">
+          <span class="file-drop-icon">📷</span>
+          <strong>Scatta una foto o importa un documento</strong>
+          <small>Immagine o PDF. Il file resta sul dispositivo.</small>
+          <input id="documentInput" type="file" accept="image/*,application/pdf" capture="environment" />
+        </label>
+        <div id="fileInfo" class="file-info hidden"></div>
+        <div class="button-row">
+          <button id="analyzeBtn" class="btn secondary" type="button" disabled>Leggi dati automaticamente</button>
+          <button id="removeFileBtn" class="btn danger ghost hidden" type="button">Rimuovi allegato</button>
+        </div>
+        <div id="ocrProgress" class="progress-wrap hidden">
+          <progress id="ocrProgressBar" max="100" value="0"></progress>
+          <span id="ocrProgressText">Analisi in corso…</span>
+        </div>
+        <p class="privacy-note">La lettura automatica avviene nel browser. Controlla sempre i dati prima di salvare.</p>
+      </section>
+
+      <div class="form-grid">
+        <label>
+          Numero PUC
+          <input id="puc" name="puc" inputmode="numeric" maxlength="30" placeholder="Es. 451368375" />
+        </label>
+        <label>
+          Data visita
+          <input id="visitDate" name="visitDate" type="date" />
+        </label>
+        <label>
+          Malattia dal
+          <input id="startDate" name="startDate" type="date" required />
+        </label>
+        <label>
+          Prognosi fino al
+          <input id="endDate" name="endDate" type="date" required />
+        </label>
+        <label>
+          Tipo certificato
+          <select id="certificateType" name="certificateType">
+            <option value="inizio">Inizio</option>
+            <option value="continuazione">Continuazione</option>
+            <option value="ricaduta">Ricaduta</option>
+          </select>
+        </label>
+        <label>
+          Tipo visita
+          <select id="visitType" name="visitType">
+            <option value="ambulatoriale">Ambulatoriale</option>
+            <option value="domiciliare">Domiciliare</option>
+            <option value="pronto-soccorso">Pronto soccorso</option>
+            <option value="non-indicato">Non indicato</option>
+          </select>
+        </label>
+        <label class="span-2">
+          Medico
+          <input id="doctor" name="doctor" autocomplete="off" placeholder="Cognome e nome" />
+        </label>
+        <label class="span-2">
+          Diagnosi / note cliniche
+          <textarea id="diagnosis" name="diagnosis" rows="3" placeholder="Campo facoltativo e nascosto nelle schede"></textarea>
+        </label>
+        <label class="span-2">
+          Note personali
+          <textarea id="notes" name="notes" rows="3" placeholder="Es. comunicato all'azienda, controllo previsto…"></textarea>
+        </label>
+      </div>
+
+      <p id="formMessage" class="form-message" role="alert"></p>
+
+      <div class="dialog-actions">
+        <button id="cancelBtn" class="btn secondary" type="button">Annulla</button>
+        <button class="btn primary" type="submit">Salva certificato</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="detailsDialog" class="dialog details-dialog">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">Dettaglio</p>
+        <h2 id="detailsTitle">Certificato</h2>
+      </div>
+      <button id="closeDetailsBtn" class="icon-btn" type="button" aria-label="Chiudi">✕</button>
+    </div>
+    <div id="detailsContent"></div>
+    <div class="dialog-actions">
+      <button id="viewAttachmentBtn" class="btn secondary hidden" type="button">Apri allegato</button>
+      <button id="editRecordBtn" class="btn secondary" type="button">Modifica</button>
+      <button id="deleteRecordBtn" class="btn danger" type="button">Elimina</button>
+    </div>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
+  <script src="crypto.js"></script>
+  <script src="db.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
