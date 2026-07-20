@@ -606,7 +606,7 @@ const App = (() => {
     try {
       let result;
       if (attachment.type === 'application/pdf') result = await analyzePdf(attachment.dataUrl);
-      else if (attachment.type.startsWith('image/')) result = await runOcr(attachment.dataUrl, 10, 92);
+      else if (attachment.type.startsWith('image/')) result = await analyzeInpsCertificateImage(attachment.dataUrl);
       else throw new Error('Formato non supportato per la lettura automatica.');
       const parsed = parseCertificateText(result.text, result.confidence);
       applyParsedFields(parsed);
@@ -644,6 +644,188 @@ const App = (() => {
     const worker = await getOcrWorker();
     const result = await worker.recognize(source);
     return { text: result.data.text || '', confidence: Number(result.data.confidence || 0) };
+  }
+
+  async function cropForTargetOcr(dataUrl, region) {
+    const image = await ScannerTools.loadImage(dataUrl);
+    const sx = Math.max(0, Math.round(image.naturalWidth * region.x));
+    const sy = Math.max(0, Math.round(image.naturalHeight * region.y));
+    const sw = Math.max(20, Math.round(image.naturalWidth * region.w));
+    const sh = Math.max(20, Math.round(image.naturalHeight * region.h));
+    const scale = Math.min(4.5, Math.max(2.4, 1000 / Math.max(sw, 1)));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(sw * scale));
+    canvas.height = Math.max(1, Math.round(sh * scale));
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = imageData.data;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const gray = Math.round(.299 * pixels[i] + .587 * pixels[i + 1] + .114 * pixels[i + 2]);
+      const contrasted = Math.max(0, Math.min(255, 1.75 * (gray - 150) + 150));
+      pixels[i] = pixels[i + 1] = pixels[i + 2] = contrasted;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL('image/jpeg', .92);
+  }
+
+  async function recognizeTargetRegion(dataUrl, region, options = {}) {
+    const worker = await getOcrWorker();
+    const source = await cropForTargetOcr(dataUrl, region);
+    const psm = String(options.psm || 6);
+    const whitelist = options.whitelist || '';
+    try {
+      if (worker.setParameters) {
+        await worker.setParameters({
+          tessedit_pageseg_mode: psm,
+          tessedit_char_whitelist: whitelist,
+          preserve_interword_spaces: '1'
+        });
+      }
+      const result = await worker.recognize(source);
+      return String(result?.data?.text || '').trim();
+    } finally {
+      if (worker.setParameters) {
+        await worker.setParameters({
+          tessedit_pageseg_mode: '3',
+          tessedit_char_whitelist: '',
+          preserve_interword_spaces: '1'
+        });
+      }
+    }
+  }
+
+  function firstDateFromTarget(value) {
+    const match = String(value || '').match(/(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})/);
+    return match ? match[1].replace(/\s/g, '') : '';
+  }
+
+  function firstPucFromTarget(value) {
+    const normalized = String(value || '')
+      .replace(/[OoQ]/g, '0')
+      .replace(/[Il|]/g, '1')
+      .replace(/[Ss]/g, '5')
+      .replace(/[Bb]/g, '8')
+      .replace(/[^0-9]/g, '');
+    const exactNine = normalized.match(/\d{9}/)?.[0] || '';
+    return exactNine || (normalized.length >= 7 && normalized.length <= 20 ? normalized : '');
+  }
+
+  function doctorFromTarget(value) {
+    const cleaned = String(value || '')
+      .replace(/DATI\s+DEL\s+MEDICO/gi, ' ')
+      .replace(/\b(?:COGNOME|CORROME|E NOME|CODICE|REGIONE|ASL|AO|RICOVERO|STRUTTURA)\b/gi, ' ')
+      .replace(/[|_\[\]{}0-9]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    const candidates = [...cleaned.matchAll(/\b([A-ZÀ-Ü]{2,}(?:\s+[A-ZÀ-Ü]{2,}){1,5})\b/g)]
+      .map(match => match[1].trim())
+      .filter(item => !/(DATI|MEDICO|CODICE|REGIONE|STRUTTURA)/i.test(item));
+    return candidates.sort((a, b) => b.length - a.length)[0] || '';
+  }
+
+  function diagnosisFromTarget(value) {
+    const lines = String(value || '').split(/\n+/)
+      .map(line => line
+        .replace(/DATI\s+DIAGNOSI/gi, ' ')
+        .replace(/Cod\.?\s*Nosologico/gi, ' ')
+        .replace(/La malattia è dovuta ad evento traumatico/gi, ' ')
+        .replace(/Note di diagnosi/gi, ' ')
+        .replace(/[|_\[\]{}]/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim())
+      .filter(line => line.length >= 5)
+      .filter(line => /[a-zà-ù]{4}/.test(line));
+    return (lines.sort((a, b) => b.length - a.length)[0] || '')
+      .replace(/lombosci\s*[:\-]?\s*gia/ig, 'lombosciatalgia')
+      .replace(/lombosci\s*atalgia/ig, 'lombosciatalgia');
+  }
+
+  async function detectTemplateChecks(dataUrl) {
+    const image = await ScannerTools.loadImage(dataUrl);
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    ctx.drawImage(image, 0, 0);
+
+    const score = box => {
+      const x = Math.max(0, Math.round(canvas.width * box.x));
+      const y = Math.max(0, Math.round(canvas.height * box.y));
+      const w = Math.max(8, Math.round(canvas.width * box.w));
+      const h = Math.max(8, Math.round(canvas.height * box.h));
+      const padX = Math.max(2, Math.round(w * .18));
+      const padY = Math.max(2, Math.round(h * .18));
+      const data = ctx.getImageData(x + padX, y + padY, Math.max(1, w - 2 * padX), Math.max(1, h - 2 * padY)).data;
+      let dark = 0;
+      let total = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = .299 * data[i] + .587 * data[i + 1] + .114 * data[i + 2];
+        if (gray < 145) dark += 1;
+        total += 1;
+      }
+      return total ? dark / total : 0;
+    };
+
+    const boxes = {
+      inizio: { x: .284, y: .312, w: .018, h: .014 },
+      continuazione: { x: .466, y: .312, w: .018, h: .014 },
+      ricaduta: { x: .584, y: .311, w: .018, h: .014 },
+      ambulatoriale: { x: .339, y: .331, w: .019, h: .014 },
+      domiciliare: { x: .604, y: .329, w: .018, h: .014 },
+      prontoSoccorso: { x: .839, y: .329, w: .018, h: .014 }
+    };
+    const values = Object.fromEntries(Object.entries(boxes).map(([key, box]) => [key, score(box)]));
+    const choose = keys => {
+      const ranked = keys.map(key => ({ key, value: values[key] })).sort((a, b) => b.value - a.value);
+      return ranked[0]?.value >= .14 && ranked[0].value >= (ranked[1]?.value || 0) + .06 ? ranked[0].key : '';
+    };
+    return {
+      certificateType: choose(['inizio', 'continuazione', 'ricaduta']),
+      visitType: choose(['ambulatoriale', 'domiciliare', 'prontoSoccorso'])
+    };
+  }
+
+  async function analyzeInpsCertificateImage(dataUrl) {
+    const full = await runOcr(dataUrl, 8, 48);
+    if (!/(certificato\s+di\s+malattia|DATI\s+PROGNOSI|protocollo\s+univoc)/i.test(full.text)) return full;
+
+    setOcrProgress(true, 58, 'Rilevo numero PUC e date…');
+    const pucText = await recognizeTargetRegion(dataUrl, { x: .37, y: .085, w: .25, h: .040 }, { psm: 6, whitelist: '0123456789' });
+    setOcrProgress(true, 65, 'Rilevo la data della visita…');
+    const visitText = await recognizeTargetRegion(dataUrl, { x: .60, y: .084, w: .28, h: .043 }, { psm: 11, whitelist: '0123456789/.-' });
+    setOcrProgress(true, 72, 'Rilevo il periodo di prognosi…');
+    const startText = await recognizeTargetRegion(dataUrl, { x: .33, y: .242, w: .25, h: .048 }, { psm: 11, whitelist: '0123456789/.-' });
+    const endText = await recognizeTargetRegion(dataUrl, { x: .68, y: .242, w: .27, h: .048 }, { psm: 11, whitelist: '0123456789/.-' });
+    setOcrProgress(true, 82, 'Rilevo medico e diagnosi…');
+    const doctorText = await recognizeTargetRegion(dataUrl, { x: .08, y: .148, w: .46, h: .060 }, { psm: 6 });
+    const diagnosisText = await recognizeTargetRegion(dataUrl, { x: .20, y: .358, w: .73, h: .070 }, { psm: 6 });
+    const checks = await detectTemplateChecks(dataUrl);
+
+    const puc = firstPucFromTarget(pucText);
+    const visitDate = firstDateFromTarget(visitText);
+    const startDate = firstDateFromTarget(startText);
+    const endDate = firstDateFromTarget(endText);
+    const doctor = doctorFromTarget(doctorText);
+    const diagnosis = diagnosisFromTarget(diagnosisText);
+    const hints = [
+      puc && `__PUC__: ${puc}`,
+      visitDate && `__VISIT_DATE__: ${visitDate}`,
+      startDate && `__START_DATE__: ${startDate}`,
+      endDate && `__END_DATE__: ${endDate}`,
+      doctor && `__DOCTOR__: ${doctor}`,
+      diagnosis && `__DIAGNOSIS__: ${diagnosis}`,
+      checks.certificateType && `__CERT_TYPE__: ${checks.certificateType}`,
+      checks.visitType && `__VISIT_TYPE__: ${checks.visitType === 'prontoSoccorso' ? 'pronto-soccorso' : checks.visitType}`
+    ].filter(Boolean).join('\n');
+
+    return {
+      text: `${hints}\n${full.text}`,
+      confidence: full.confidence
+    };
   }
 
   async function analyzePdf(dataUrl) {
@@ -687,86 +869,120 @@ const App = (() => {
   function parseCertificateText(rawText, documentConfidence = 70) {
     const original = String(rawText || '').replace(/\r/g, '\n');
     const text = original
-      .replace(/[|¦]/g, ' ')
+      .replace(/[¦]/g, ' ')
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{2,}/g, '\n');
     const compact = text.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
     const confidence = {};
+    const hint = name => text.match(new RegExp(`__${name}__\\s*:\\s*([^\\n]+)`, 'i'))?.[1]?.trim() || '';
 
     const normalizeOcrDigits = value => String(value || '')
       .replace(/[OoQ]/g, '0')
       .replace(/[Il|]/g, '1')
+      .replace(/[Ss]/g, '5')
+      .replace(/[Bb]/g, '8')
       .replace(/[^0-9]/g, '');
 
     const dateMatches = [...compact.matchAll(/\b(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})\b/g)]
       .map(match => ({ value: normalizeDate(match[1].replace(/\s/g, '')), index: match.index || 0 }))
       .filter(item => item.value);
 
-    const dateAfter = (regexp, maxDistance = 220) => {
+    const dateAfter = (regexp, maxDistance = 240) => {
       const match = compact.match(regexp);
       if (!match) return '';
       const from = (match.index || 0) + match[0].length;
       return dateMatches.find(item => item.index >= from && item.index - from <= maxDistance)?.value || '';
     };
 
-    // Il PUC dei certificati INPS è spesso di 9 cifre. L'OCR può inserire spazi o confondere O/0 e I/1.
-    const pucContext = compact.match(/(?:\bPUC\b|protocollo\s+univoc[o0](?:\s+del\s+certificat[o0])?)[\s\S]{0,140}/i)?.[0] || '';
-    let puc = normalizeOcrDigits(
-      pucContext.match(/(?:\bPUC\b|protocollo\s+univoc[o0](?:\s+del\s+certificat[o0])?)[^0-9OoQIl|]{0,80}((?:[0-9OoQIl|][\s.,:;_-]*){7,20})/i)?.[1] || ''
-    );
+    let puc = normalizeOcrDigits(hint('PUC'));
     if (puc.length < 7) {
-      const numericCandidates = [...compact.matchAll(/\b(?:[0-9OoQIl|][\s.,:;_-]*){9,20}\b/g)]
-        .map(match => normalizeOcrDigits(match[0]))
-        .filter(value => value.length >= 9 && value.length <= 20);
-      puc = numericCandidates.find(value => value.length === 9) || numericCandidates[0] || '';
+      const headerEnd = compact.search(/DATI\s+DEL\s+MEDICO/i);
+      const header = headerEnd > 0 ? compact.slice(0, headerEnd) : compact.slice(0, 1200);
+      const labelled = header.match(/(?:\bPU[CG]\b|protocollo\s+univoc[o0](?:\s+del\s+certificat[o0])?)[^0-9OoQIl|SsBb]{0,100}((?:[0-9OoQIl|SsBb][\s.,:;_\-]*){7,20})/i)?.[1] || '';
+      puc = normalizeOcrDigits(labelled);
+      if (puc.length < 7) {
+        const candidates = [...header.matchAll(/(?:[0-9OoQIl|SsBb][^A-Za-zÀ-ÿ0-9]{0,3}){9,20}/g)]
+          .map(item => normalizeOcrDigits(item[0]))
+          .filter(value => value.length >= 9 && value.length <= 20);
+        puc = candidates.find(value => value.length === 9) || candidates[0] || '';
+      }
     }
 
-    const visitDate = dateAfter(/Data\s*Visita/i, 160) || dateMatches[0]?.value || '';
-    let startDate = dateAfter(/(?:ammalat[oa]|malattia)\s+dal/i, 260);
-    let endDate = dateAfter(/(?:fino\s+al|tutto\s+il|prognosi[^\d]{0,40}(?:al|fino))/i, 280);
+    const visitDateHint = normalizeDate(hint('VISIT_DATE'));
+    const startDateHint = normalizeDate(hint('START_DATE'));
+    const endDateHint = normalizeDate(hint('END_DATE'));
+    const visitDate = visitDateHint || dateAfter(/Data\s*Visita/i, 180) || dateMatches[0]?.value || '';
 
-    // Sul modulo INPS le tre prime date sono normalmente: visita, inizio malattia, fine prognosi.
-    if (!startDate || !endDate) {
-      const uniqueDates = dateMatches.filter((item, index, arr) => arr.findIndex(other => other.value === item.value) === index);
-      if (!startDate && uniqueDates.length >= 2) startDate = uniqueDates[1].value;
-      if (!endDate && uniqueDates.length >= 3) endDate = uniqueDates[2].value;
-      if (!startDate && uniqueDates.length === 1) startDate = uniqueDates[0].value;
+    const prognosisBlock = text.match(/DATI\s+PROGNOSI([\s\S]{0,1200}?)(?:DATI\s+DIAGNOSI|DIAGNOSI)/i)?.[1]
+      || text.match(/(?:lavoratore\s+dichiara|ammalat[oa]\s+dal)([\s\S]{0,900}?)(?:DATI\s+DIAGNOSI|Trattasi\s+di|Visita\s*:)/i)?.[0]
+      || '';
+    const prognosisDates = [...prognosisBlock.matchAll(/\b(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})\b/g)]
+      .map(match => normalizeDate(match[1].replace(/\s/g, '')))
+      .filter(Boolean);
+    const uniquePrognosisDates = [...new Set(prognosisDates)];
+
+    let startDate = startDateHint
+      || dateAfter(/(?:ammalat[oa]|malattia)\s+dal/i, 300)
+      || uniquePrognosisDates[0]
+      || '';
+    let endDate = endDateHint
+      || dateAfter(/(?:tutto\s+il|fino\s+al|prognosi\s+clinica[\s\S]{0,70}?(?:il|al))/i, 320)
+      || uniquePrognosisDates.at(-1)
+      || '';
+
+    if (startDate) {
+      const startTime = parseLocalDate(startDate)?.getTime?.() || NaN;
+      const plausibleLater = [...new Set([...uniquePrognosisDates, ...dateMatches.map(item => item.value)])]
+        .filter(Boolean)
+        .map(value => ({ value, time: parseLocalDate(value)?.getTime?.() || NaN }))
+        .filter(item => Number.isFinite(item.time) && Number.isFinite(startTime) && item.time > startTime && item.time - startTime <= 370 * 86400000)
+        .sort((a, b) => a.time - b.time)[0]?.value || '';
+      if ((!endDate || endDate <= startDate) && plausibleLater) endDate = plausibleLater;
     }
 
-    const doctorBlock = text.match(/DATI\s+DEL\s+MEDICO([\s\S]{0,650}?)(?:DATI\s+PROGNOSI|PROGNOSI)/i)?.[1] || '';
+    const doctorHint = hint('DOCTOR');
+    const doctorBlock = text.match(/DATI\s+DEL\s+MEDICO([\s\S]{0,750}?)(?:DATI\s+PROGNOSI|PROGNOSI)/i)?.[1] || '';
     const doctorLines = doctorBlock.split('\n')
       .map(line => line.replace(/[^A-Za-zÀ-ÿ' ]/g, ' ').replace(/\s{2,}/g, ' ').trim())
       .filter(line => line.length >= 7)
       .filter(line => !/(COGNOME|NOME|CODICE|REGIONE|ASL|AO|MEDICO|SSN|LIBERO|PROFESSIONISTA|OPERA|RUOLO|STRUTTURA)/i.test(line));
-    let doctor = doctorLines.find(line => {
+    let doctor = doctorHint || doctorLines.find(line => {
       const letters = line.match(/[A-Za-zÀ-ÿ]/g) || [];
       const upper = line.match(/[A-ZÀ-Ü]/g) || [];
-      return line.split(/\s+/).length >= 2 && letters.length > 5 && upper.length / letters.length > 0.6;
+      return line.split(/\s+/).length >= 2 && letters.length > 5 && upper.length / letters.length > 0.58;
     }) || '';
     if (!doctor) {
       doctor = doctorBlock.match(/(?:Cognome\s*e\s*nome)?\s*([A-ZÀ-Ü][A-ZÀ-Ü' ]{5,70})/)?.[1] || '';
     }
 
-    const diagnosisBlock = text.match(/DATI\s+DIAGNOSI([\s\S]{0,750}?)(?:Patologia\s+grave|DATI\s+DEL\s+LAVORATORE)/i)?.[1] || '';
+    const diagnosisHint = hint('DIAGNOSIS');
+    const diagnosisBlock = text.match(/DATI\s+DIAGNOSI([\s\S]{0,900}?)(?:Patologia\s+grave|DATI\s+DEL\s+LAVORATORE)/i)?.[1] || '';
     const diagnosisLines = diagnosisBlock.split('\n')
       .map(line => line.replace(/[|_\[\]{}]/g, ' ').replace(/\s{2,}/g, ' ').trim())
       .filter(line => line.length >= 5)
       .filter(line => !/(Cod\.?\s*Nosologico|malattia\s+è\s+dovuta|evento\s+traumatico|Note\s+di\s+diagnosi|DATI\s+DIAGNOSI)/i.test(line))
       .filter(line => /[a-zà-ù]{4}/.test(line));
-    let diagnosis = diagnosisLines.sort((a, b) => b.length - a.length)[0] || '';
+    let diagnosis = diagnosisHint || diagnosisLines.sort((a, b) => b.length - a.length)[0] || '';
 
-    const marked = label => new RegExp(`${label}[^\\n]{0,35}(?:[xX☒■✓]|\\[x\\])`, 'i').test(text);
-    const certificateType = marked('continuazione') ? 'continuazione' : marked('ricaduta') ? 'ricaduta' : 'inizio';
-    const visitType = marked('domiciliare') ? 'domiciliare' : marked('pronto\\s*soccorso') ? 'pronto-soccorso' : marked('ambulatoriale') ? 'ambulatoriale' : 'non-indicato';
+    const certificateTypeHint = hint('CERT_TYPE');
+    const visitTypeHint = hint('VISIT_TYPE');
+    const marked = label => new RegExp(`(?:${label})[^\\n]{0,35}(?:[xX☒■✓]|\\[x\\]|\\bM[I1]?\\b)`, 'i').test(text)
+      || new RegExp(`(?:[xX☒■✓]|\\[x\\]|\\bM[I1]?\\b)[^\\n]{0,16}(?:${label})`, 'i').test(text);
+    const certificateType = ['inizio', 'continuazione', 'ricaduta'].includes(certificateTypeHint)
+      ? certificateTypeHint
+      : marked('continuazione') ? 'continuazione' : marked('ricaduta') ? 'ricaduta' : 'inizio';
+    const visitType = ['ambulatoriale', 'domiciliare', 'pronto-soccorso'].includes(visitTypeHint)
+      ? visitTypeHint
+      : marked('domiciliare') ? 'domiciliare' : marked('pronto\\s*soccorso') ? 'pronto-soccorso' : marked('ambulatoriale') ? 'ambulatoriale' : 'non-indicato';
 
-    confidence.puc = puc ? Math.min(94, documentConfidence) : 0;
-    confidence.visitDate = visitDate ? Math.min(94, documentConfidence) : 0;
-    confidence.startDate = startDate ? Math.min(90, documentConfidence) : 0;
-    confidence.endDate = endDate ? Math.min(90, documentConfidence) : 0;
-    confidence.doctor = doctor ? Math.min(80, documentConfidence) : 0;
-    confidence.diagnosis = diagnosis ? Math.min(72, documentConfidence) : 0;
-    confidence.certificateType = marked('inizio|continuazione|ricaduta') ? Math.min(85, documentConfidence) : 55;
-    confidence.visitType = visitType !== 'non-indicato' ? Math.min(82, documentConfidence) : 45;
+    confidence.puc = puc ? Math.min(96, documentConfidence) : 0;
+    confidence.visitDate = visitDate ? Math.min(96, documentConfidence) : 0;
+    confidence.startDate = startDate ? Math.min(94, documentConfidence) : 0;
+    confidence.endDate = endDate ? Math.min(94, documentConfidence) : 0;
+    confidence.doctor = doctor ? Math.min(88, documentConfidence) : 0;
+    confidence.diagnosis = diagnosis ? Math.min(82, documentConfidence) : 0;
+    confidence.certificateType = certificateTypeHint ? 92 : (marked('inizio|continuazione|ricaduta') ? Math.min(85, documentConfidence) : 55);
+    confidence.visitType = visitTypeHint ? 92 : (visitType !== 'non-indicato' ? Math.min(82, documentConfidence) : 45);
 
     return {
       fields: {

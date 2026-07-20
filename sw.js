@@ -1,8 +1,8 @@
 'use strict';
 
-const CACHE = 'archivio-malattia-v2.0.1';
+const CACHE = 'archivio-malattia-v2.0.2';
 const CORE_ASSETS = [
-  './','./index.html','./styles.css','./app.js','./db.js','./crypto.js','./scanner.js','./manifest.webmanifest',
+  './','./index.html','./styles.css?v=2.0.2','./app.js?v=2.0.2','./db.js','./crypto.js','./scanner.js?v=2.0.2','./manifest.webmanifest',
   './icons/icon-192.png','./icons/icon-512.png','./icons/icon-maskable-512.png',
   './vendor/tesseract/tesseract.min.js','./vendor/pdfjs/pdf.min.js','./vendor/pdfjs/pdf.worker.min.js','./vendor/jspdf/jspdf.umd.min.js'
 ];
