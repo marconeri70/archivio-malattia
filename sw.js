@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'archivio-malattia-v2.0.0';
+const CACHE = 'archivio-malattia-v2.0.1';
 const CORE_ASSETS = [
   './','./index.html','./styles.css','./app.js','./db.js','./crypto.js','./scanner.js','./manifest.webmanifest',
   './icons/icon-192.png','./icons/icon-512.png','./icons/icon-maskable-512.png',

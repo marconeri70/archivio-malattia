@@ -685,45 +685,99 @@ const App = (() => {
   }
 
   function parseCertificateText(rawText, documentConfidence = 70) {
-    const text = String(rawText || '').replace(/\r/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n');
-    const compact = text.replace(/\n/g, ' ');
-    const dates = [...compact.matchAll(/\b(\d{2}[\/.-]\d{2}[\/.-]\d{4})\b/g)].map(match => normalizeDate(match[1])).filter(Boolean);
+    const original = String(rawText || '').replace(/\r/g, '\n');
+    const text = original
+      .replace(/[|¦]/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{2,}/g, '\n');
+    const compact = text.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
     const confidence = {};
 
-    const pucMatch = compact.match(/(?:PUC|protocollo unico(?: del certificato)?)[^\d]{0,55}(\d{7,20})/i) || compact.match(/\b(\d{9,20})\b/);
-    const visitDateMatch = compact.match(/Data\s*Visita[^\d]{0,20}(\d{2}[\/.-]\d{2}[\/.-]\d{4})/i);
-    const prognosisMatch = compact.match(/ammalato\s+dal[^\d]{0,20}(\d{2}[\/.-]\d{2}[\/.-]\d{4})[\s\S]{0,120}?(?:fino\s+al|tutto\s+il)[^\d]{0,20}(\d{2}[\/.-]\d{2}[\/.-]\d{4})/i);
-    const doctorBlock = text.match(/DATI DEL MEDICO([\s\S]{0,320}?)(?:DATI PROGNOSI|PROGNOSI)/i)?.[1] || '';
-    const doctorMatch = doctorBlock.match(/(?:Cognome\s*e\s*nome)?\s*([A-ZÀ-Ü][A-ZÀ-Ü' ]{5,70})/);
-    const diagnosisMatch = text.match(/(?:Note di diagnosi|DATI DIAGNOSI)[\s\S]{0,180}?\n?([^\n]{5,220})/i);
+    const normalizeOcrDigits = value => String(value || '')
+      .replace(/[OoQ]/g, '0')
+      .replace(/[Il|]/g, '1')
+      .replace(/[^0-9]/g, '');
 
-    let startDate = '', endDate = '';
-    if (prognosisMatch) {
-      startDate = normalizeDate(prognosisMatch[1]); endDate = normalizeDate(prognosisMatch[2]);
-      confidence.startDate = confidence.endDate = Math.min(97, documentConfidence);
-    } else if (dates.length >= 3) {
-      startDate = dates[1]; endDate = dates[2];
-      confidence.startDate = confidence.endDate = Math.min(62, documentConfidence);
+    const dateMatches = [...compact.matchAll(/\b(\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{4})\b/g)]
+      .map(match => ({ value: normalizeDate(match[1].replace(/\s/g, '')), index: match.index || 0 }))
+      .filter(item => item.value);
+
+    const dateAfter = (regexp, maxDistance = 220) => {
+      const match = compact.match(regexp);
+      if (!match) return '';
+      const from = (match.index || 0) + match[0].length;
+      return dateMatches.find(item => item.index >= from && item.index - from <= maxDistance)?.value || '';
+    };
+
+    // Il PUC dei certificati INPS è spesso di 9 cifre. L'OCR può inserire spazi o confondere O/0 e I/1.
+    const pucContext = compact.match(/(?:\bPUC\b|protocollo\s+univoc[o0](?:\s+del\s+certificat[o0])?)[\s\S]{0,140}/i)?.[0] || '';
+    let puc = normalizeOcrDigits(
+      pucContext.match(/(?:\bPUC\b|protocollo\s+univoc[o0](?:\s+del\s+certificat[o0])?)[^0-9OoQIl|]{0,80}((?:[0-9OoQIl|][\s.,:;_-]*){7,20})/i)?.[1] || ''
+    );
+    if (puc.length < 7) {
+      const numericCandidates = [...compact.matchAll(/\b(?:[0-9OoQIl|][\s.,:;_-]*){9,20}\b/g)]
+        .map(match => normalizeOcrDigits(match[0]))
+        .filter(value => value.length >= 9 && value.length <= 20);
+      puc = numericCandidates.find(value => value.length === 9) || numericCandidates[0] || '';
     }
 
-    const marked = label => new RegExp(`${label}[^\\n]{0,25}(?:[xX☒■✓]|\\[x\\])`, 'i').test(text);
+    const visitDate = dateAfter(/Data\s*Visita/i, 160) || dateMatches[0]?.value || '';
+    let startDate = dateAfter(/(?:ammalat[oa]|malattia)\s+dal/i, 260);
+    let endDate = dateAfter(/(?:fino\s+al|tutto\s+il|prognosi[^\d]{0,40}(?:al|fino))/i, 280);
+
+    // Sul modulo INPS le tre prime date sono normalmente: visita, inizio malattia, fine prognosi.
+    if (!startDate || !endDate) {
+      const uniqueDates = dateMatches.filter((item, index, arr) => arr.findIndex(other => other.value === item.value) === index);
+      if (!startDate && uniqueDates.length >= 2) startDate = uniqueDates[1].value;
+      if (!endDate && uniqueDates.length >= 3) endDate = uniqueDates[2].value;
+      if (!startDate && uniqueDates.length === 1) startDate = uniqueDates[0].value;
+    }
+
+    const doctorBlock = text.match(/DATI\s+DEL\s+MEDICO([\s\S]{0,650}?)(?:DATI\s+PROGNOSI|PROGNOSI)/i)?.[1] || '';
+    const doctorLines = doctorBlock.split('\n')
+      .map(line => line.replace(/[^A-Za-zÀ-ÿ' ]/g, ' ').replace(/\s{2,}/g, ' ').trim())
+      .filter(line => line.length >= 7)
+      .filter(line => !/(COGNOME|NOME|CODICE|REGIONE|ASL|AO|MEDICO|SSN|LIBERO|PROFESSIONISTA|OPERA|RUOLO|STRUTTURA)/i.test(line));
+    let doctor = doctorLines.find(line => {
+      const letters = line.match(/[A-Za-zÀ-ÿ]/g) || [];
+      const upper = line.match(/[A-ZÀ-Ü]/g) || [];
+      return line.split(/\s+/).length >= 2 && letters.length > 5 && upper.length / letters.length > 0.6;
+    }) || '';
+    if (!doctor) {
+      doctor = doctorBlock.match(/(?:Cognome\s*e\s*nome)?\s*([A-ZÀ-Ü][A-ZÀ-Ü' ]{5,70})/)?.[1] || '';
+    }
+
+    const diagnosisBlock = text.match(/DATI\s+DIAGNOSI([\s\S]{0,750}?)(?:Patologia\s+grave|DATI\s+DEL\s+LAVORATORE)/i)?.[1] || '';
+    const diagnosisLines = diagnosisBlock.split('\n')
+      .map(line => line.replace(/[|_\[\]{}]/g, ' ').replace(/\s{2,}/g, ' ').trim())
+      .filter(line => line.length >= 5)
+      .filter(line => !/(Cod\.?\s*Nosologico|malattia\s+è\s+dovuta|evento\s+traumatico|Note\s+di\s+diagnosi|DATI\s+DIAGNOSI)/i.test(line))
+      .filter(line => /[a-zà-ù]{4}/.test(line));
+    let diagnosis = diagnosisLines.sort((a, b) => b.length - a.length)[0] || '';
+
+    const marked = label => new RegExp(`${label}[^\\n]{0,35}(?:[xX☒■✓]|\\[x\\])`, 'i').test(text);
     const certificateType = marked('continuazione') ? 'continuazione' : marked('ricaduta') ? 'ricaduta' : 'inizio';
     const visitType = marked('domiciliare') ? 'domiciliare' : marked('pronto\\s*soccorso') ? 'pronto-soccorso' : marked('ambulatoriale') ? 'ambulatoriale' : 'non-indicato';
 
-    confidence.puc = pucMatch ? Math.min(96, documentConfidence) : 0;
-    confidence.visitDate = visitDateMatch ? Math.min(96, documentConfidence) : (dates[0] ? Math.min(65, documentConfidence) : 0);
-    confidence.doctor = doctorMatch ? Math.min(82, documentConfidence) : 0;
-    confidence.diagnosis = diagnosisMatch ? Math.min(72, documentConfidence) : 0;
+    confidence.puc = puc ? Math.min(94, documentConfidence) : 0;
+    confidence.visitDate = visitDate ? Math.min(94, documentConfidence) : 0;
+    confidence.startDate = startDate ? Math.min(90, documentConfidence) : 0;
+    confidence.endDate = endDate ? Math.min(90, documentConfidence) : 0;
+    confidence.doctor = doctor ? Math.min(80, documentConfidence) : 0;
+    confidence.diagnosis = diagnosis ? Math.min(72, documentConfidence) : 0;
     confidence.certificateType = marked('inizio|continuazione|ricaduta') ? Math.min(85, documentConfidence) : 55;
     confidence.visitType = visitType !== 'non-indicato' ? Math.min(82, documentConfidence) : 45;
 
     return {
       fields: {
-        puc: pucMatch?.[1] || '',
-        visitDate: visitDateMatch ? normalizeDate(visitDateMatch[1]) : (dates[0] || ''),
-        startDate, endDate, certificateType, visitType,
-        doctor: cleanExtractedName(doctorMatch?.[1] || ''),
-        diagnosis: cleanDiagnosis(diagnosisMatch?.[1] || '')
+        puc,
+        visitDate,
+        startDate,
+        endDate,
+        certificateType,
+        visitType,
+        doctor: cleanExtractedName(doctor),
+        diagnosis: cleanDiagnosis(diagnosis)
       },
       confidence,
       documentConfidence
